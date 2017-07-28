@@ -129,4 +129,111 @@ id returnValue = objc_msgSend(someObject, @selector(messageName:), parameter);
 ```
 这个方法可以实现的很简单：只需改变调用目标，使消息在新目标上得以调用即可。然而这样实现出来的方法与“备援接收者”方案所实现放的方法等校，所以很少有人采用这么简单的实现方式。
 
+### 消息转发全流程
 
+![NSInvocation invocation](https://raw.githubusercontent.com/lxbboy326/Deep-learning-Objective-C/8f8faaa1f0b666ebf4b531e15145f61f15c35f8a/resource/invocation.png)
+
+步骤越往后，处理消息的代价就越大。最好能在第一步就处理完，这样的话，运行期系统就可以将此方法缓存起来了。如果这个类的实例稍后还收到同名选择子，那么根本无须启动消息转发流程。若想在第三步把消息转给备援的接收者，那还不如把转发操作提前到第二步。因为第三步之时修改了调用目标，这项改动放在第二步会更为简单，不然后的话，还得闯将并处理完整的NSInvocation。
+
+### 示例演示动态方法解析
+
+本例编写一个类似于“字典”的对象，它里面可以容纳其他对象，只不过开发者要直接通过属性来存取其中的数据。这个类的设计思路是：由开发者来添加属性定义，并将其声明为@dynamic，而类则会自动处理相关属性值的存放与获取操作。
+类的接口可以写成：
+
+```
+#import <Foundation/Foundation.h>
+
+@interface LXBAutoDictionary : NSObject
+
+@property(nonatomic, strong) NSString   *string;
+@property(nonatomic, strong) NSNumber   *number;
+@property(nonatomic, strong) NSDate *date;
+@property(nonatomic, strong) id opaqueObject;
+
+@end
+```
+在类的内部，每个属性的值还是会存放在字典里，所以我们先在类中编写如下代码，并将属性声明为**@dynamic**，这样的话，编译器就不会为其自动生成实例变量及存取方法了：
+
+```
+#import "LXBAutoDictionary.h"
+#import <objc/runtime.h>
+
+@interface LXBAutoDictionary()
+@property(nonatomic, strong) NSMutableDictionary *backingStore;
+@end
+
+@implementation LXBAutoDictionary
+
+@dynamic string, number, date, opaqueObject;
+
+- (id)init {
+    if (self = [super init]) {
+        _backingStore = [NSMutableDictionary new];
+    }
+    return self;
+}
+
++ (BOOL)resolveInstanceMethod:(SEL)sel {
+    NSString *selectorString = NSStringFromSelector(sel);
+    if ([selectorString hasPrefix:@"set"]) {
+        class_addMethod(self, sel, (IMP)autoDictionarySetter, "v@:@");
+    } else {
+        class_addMethod(self, sel, (IMP)autoDictionaryGetter, "@@:");
+    }
+    return YES;
+}
+
+id autoDictionaryGetter(id self, SEL _cmd) {
+    LXBAutoDictionary *typedSelf = (LXBAutoDictionary*)self;
+    NSMutableDictionary *backingStore = typedSelf.backingStore;
+    
+    NSString *key = NSStringFromSelector(_cmd);
+    return [backingStore objectForKey:key];
+}
+
+void autoDictionarySetter(id self, SEL _cmd, id value) {
+    LXBAutoDictionary *typedSelf = (LXBAutoDictionary*)self;
+    NSMutableDictionary *backingStore = typedSelf.backingStore;
+    
+    NSString *selectorString = NSStringFromSelector(_cmd);
+    NSMutableString *key = [selectorString mutableCopy];
+    
+    //remove the ':' at the end
+    [key deleteCharactersInRange:NSMakeRange(key.length - 1, 1)];
+    
+    //remove the 'set' prefix
+    [key deleteCharactersInRange:NSMakeRange(0, 3)];
+    
+    //lowercase the first character
+    NSString *lowercaseFirstChar = [[key substringToIndex:1] lowercaseString];
+    [key replaceCharactersInRange:NSMakeRange(0, 1) withString:lowercaseFirstChar];
+    
+    if (value) {
+        [backingStore setObject:value forKey:key];
+    } else {
+        [backingStore removeObjectForKey:key];
+    }
+}
+
+@end
+
+```
+LXBAutoDictionary的用法很简单：
+
+```
+    LXBAutoDictionary *dict = [LXBAutoDictionary new];
+    dict.date = [NSDate dateWithTimeIntervalSince1970:475372800];
+    dict.string = @"Hello Objective-C";
+    dict.number = @100;
+
+    NSLog(@"dict.date = %@",dict.date);
+    NSLog(@"dict.string = %@",dict.string);
+    NSLog(@"dict.number = %@",dict.number);
+```
+输出结果：
+
+```
+dict.date = 1985-01-24 00:00:00 +0000 
+dict.string = Hello Objective-C 
+dict.number = 100
+```
